@@ -16,6 +16,11 @@
       "matches": ["<all_urls>"],
       "js": ["src/content.ts"]
     }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["src/inpage.ts"], 
+      "matches": ["<all_urls>"]
+    }
   ]
 }
-

@@ -169,13 +169,6 @@ const styles = {
     }
 };
 
-// Helper for Hex Encoding (Shared)
-const toHexString = (byteArray: number[]) => {
-    return Array.from(byteArray, function(byte) {
-      return ('0' + (byte & 0xFF).toString(16)).slice(-2);
-    }).join('');
-}
-
 function Popup() {
   const [address, setAddress] = useState<string | null>(null);
   const [balance, setBalance] = useState<string>('0');
@@ -187,35 +180,34 @@ function Popup() {
   // Send Form State
   const [recipient, setRecipient] = useState('');
   const [amount, setAmount] = useState('');
-  const [fee, setFee] = useState<string | null>(null);
+  const [fee] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
   const [copyFeedback, setCopyFeedback] = useState(false);
 
   // Initial load: Check wallet
   useEffect(() => {
-    chrome.runtime.sendMessage({ type: 'GET_WALLET' }, (response: WalletResponse) => {
-      if (response && response.success && response.publicKey) {
-        // Hash the ML-DSA public key to get the QAL Address (SHA3-256, truncated to 20 bytes)
-        // Since we don't have SHA3 in popup easily without adding dependencies, 
-        // we ask the background script or node for the address, OR we just display the raw PK for now.
-        // Ideally, the wallet response should return the 'address' derived from PK.
-        
-        // For MVP visualization, let's just show hex of PK. 
-        // In production, this needs to match the Node's address derivation (SHA3-256(pk)).
-        // Let's assume background does this or we do it here if we add 'js-sha3'.
-        // For now, raw PK hex.
-        setAddress(toHexString(response.publicKey));
-        refreshData();
-      }
+    chrome.runtime.sendMessage({ type: 'GET_ACCOUNT' }, (response: any) => {
+        if (response && response.address) {
+            setAddress(response.address);
+            refreshData();
+        } else {
+            // Check if we need to create one (handled by UI button)
+        }
     });
   }, []);
 
+  const createWallet = () => {
+    setLoading(true);
+    chrome.runtime.sendMessage({ type: 'CREATE_ACCOUNT' }, (response: any) => {
+        setLoading(false);
+        if (response && response.success && response.address) {
+            setAddress(response.address);
+            refreshData();
+        }
+    });
+  };
+
   const refreshData = () => {
-      // We need to pass the address to get balance. 
-      // If we only have PK, the node needs to know how to map PK to address.
-      // But 'get_balance' expects an address string.
-      
-      // TODO: Update GET_BALANCE in background to derive address from stored PK before calling RPC.
       chrome.runtime.sendMessage({ type: 'GET_BALANCE' }, (res: WalletResponse) => {
           if (res && res.success && res.balance) setBalance(res.balance);
       });
@@ -227,8 +219,6 @@ function Popup() {
       });
   }
 
-  // ... (rest of methods)
-
   const handleSend = async () => {
       if (!recipient || !amount) {
           setStatus("Please fill in all fields");
@@ -238,13 +228,14 @@ function Popup() {
       setLoading(true);
       setStatus("Signing with ML-DSA (Quantum Safe)...");
 
-      // We send the raw fields to background. Background constructs the Quantum Transaction.
+      // Use RPC method via generic messaging
       chrome.runtime.sendMessage({ 
-          type: 'SIGN_TRANSACTION', 
-          payload: { recipient, amount } 
-      }, (response: WalletResponse) => {
+          type: 'RPC_REQUEST', 
+          method: 'eth_sendTransaction',
+          params: [{ to: recipient, value: amount }]
+      }, (response: any) => {
           setLoading(false);
-          if (response && response.success) {
+          if (response && response.result) {
               setStatus("Transaction Sent!");
               setTimeout(() => {
                   setView('main');
@@ -443,3 +434,4 @@ if (rootElement) {
       </React.StrictMode>
     );
 }
+
