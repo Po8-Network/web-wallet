@@ -23,10 +23,25 @@ A Manifest V3 Chrome Extension wallet for the Po8 Network.
 
 ## Development
 
+### Integrated (Recommended)
+From the project root:
+```bash
+npm run dev
+```
+This runs the wallet dev server on `http://localhost:3000` alongside the backend node.
+
+### Standalone
 ```bash
 npm run dev
 ```
 This will watch for changes and rebuild the extension.
+
+## Testing
+
+Run unit and integration tests:
+```bash
+npx vitest run
+```
 
 
 
