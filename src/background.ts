@@ -25,7 +25,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return true; 
 });
 
-async function handleMessage(request: any): Promise<any> {
+export async function handleMessage(request: any): Promise<any> {
     if (request.type === 'RPC_REQUEST') {
         return handleRpcRequest(request.method, request.params);
     }
@@ -145,7 +145,24 @@ async function handleRpcRequest(method: string, params: any[]): Promise<any> {
         }
 
         default:
-            return { error: `Method ${method} not implemented` };
+            // Forward unknown methods to the Node RPC
+            try {
+                const response = await fetch(RPC_URL, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        jsonrpc: '2.0',
+                        method: method,
+                        params: params,
+                        id: 1
+                    })
+                });
+                const json = await response.json();
+                if (json.error) return { error: json.error };
+                return { result: json.result };
+            } catch (e) {
+                return { error: "Network Error or Method Not Supported" };
+            }
     }
 }
 
