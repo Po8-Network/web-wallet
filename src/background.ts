@@ -3,6 +3,7 @@ import { MlDsa65 } from './crypto';
 // Storage Keys
 const STORAGE_KEY_KP = "po8_keypair";
 const RPC_URL = "http://localhost:8833/rpc";
+const MAX_PACKET = 32 * 1024;
 
 interface KeyPair {
     publicKey: number[];
@@ -16,6 +17,23 @@ interface StorageData {
 // Helper for Hex Encoding
 function toHex(buffer: Uint8Array): string {
     return Array.from(buffer).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+function toBase64(bytes: Uint8Array): string {
+    let binary = '';
+    for (let i = 0; i < bytes.length; i++) {
+        binary += String.fromCharCode(bytes[i]);
+    }
+    return btoa(binary);
+}
+
+function fromBase64(b64: string): Uint8Array {
+    const binary = atob(b64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) {
+        bytes[i] = binary.charCodeAt(i);
+    }
+    return bytes;
 }
 
 // Message Listener
@@ -66,9 +84,20 @@ async function handleRpcRequest(method: string, params: any[]): Promise<any> {
     const data = await chrome.storage.local.get(STORAGE_KEY_KP) as StorageData;
     const kp = data[STORAGE_KEY_KP];
 
-    // Methods that don't need a wallet
-    if (method === 'eth_chainId') {
-        return { result: "0x539" }; // 1337
+    // Forward chainId to node to ensure sync
+    // if (method === 'eth_chainId') ... removed
+
+    if (!kp) {
+        // If method is something that doesn't need auth, we can forward it?
+        // But for now, let's allow forwarding all public methods even without wallet?
+        // Currently 'default' block requires no wallet checks, but we return early here if !kp.
+        // This prevents 'eth_blockNumber' etc from working if no wallet is created.
+        // We should move this check inside the cases that require it.
+    }
+    
+    // Public methods that don't require wallet
+    if (['eth_chainId', 'eth_blockNumber', 'eth_getBalance', 'eth_call', 'eth_estimateGas', 'get_balance', 'net_version'].includes(method)) {
+         return forwardToNode(method, params);
     }
 
     if (!kp) {
@@ -144,25 +173,96 @@ async function handleRpcRequest(method: string, params: any[]): Promise<any> {
             return { result: "0x" + toHex(signature) };
         }
 
-        default:
-            // Forward unknown methods to the Node RPC
-            try {
-                const response = await fetch(RPC_URL, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        jsonrpc: '2.0',
-                        method: method,
-                        params: params,
-                        id: 1
-                    })
-                });
-                const json = await response.json();
-                if (json.error) return { error: json.error };
-                return { result: json.result };
-            } catch (e) {
-                return { error: "Network Error or Method Not Supported" };
+        case 'po8_sendMessage': {
+            const msgObj = params[0] || {};
+            const recipient = msgObj.to || msgObj.recipient;
+            const dataStr = msgObj.data ?? msgObj.payload ?? '';
+            const ttl = typeof msgObj.ttl === 'number' ? Math.max(1, Math.min(900, Math.floor(msgObj.ttl))) : 300;
+            const kind = typeof msgObj.kind === 'string' ? msgObj.kind : 'msg';
+            const ack_for = typeof msgObj.ack_for === 'string' ? msgObj.ack_for : undefined;
+            if (!recipient || typeof dataStr !== 'string') {
+                return { error: "Invalid params" };
             }
+
+            const encoder = new TextEncoder();
+            const payload = encoder.encode(dataStr);
+            if (payload.length > (MAX_PACKET - 4)) {
+                return { error: "Message too large" };
+            }
+            const padded = encodePayload(payload);
+            const signature = await MlDsa65.sign(padded, sk);
+            const nonce = Date.now();
+
+            const body = {
+                recipient,
+                sender_pk: toHex(pk),
+                signature: toHex(signature),
+                payload: toBase64(padded),
+                nonce,
+                ttl,
+                kind,
+                ack_for
+            };
+
+            const res = await forwardToNode('mix_send', [body]);
+            return res;
+        }
+
+        case 'po8_getMessages': {
+            const recipient = address;
+            const pollMsg = new TextEncoder().encode(`poll:${recipient}`);
+            const signature = await MlDsa65.sign(pollMsg, sk);
+
+            const body = {
+                recipient,
+                public_key: toHex(pk),
+                signature: toHex(signature)
+            };
+
+            const res = await forwardToNode('mix_poll', [body]);
+            if (res.error) return res;
+
+            const messages = Array.isArray(res.result) ? res.result : [];
+            const decoder = new TextDecoder();
+            const normalized = messages.map((m: any) => {
+                const payloadBytes = fromBase64(m.payload_b64 || '');
+                const decoded = decodePayload(payloadBytes, decoder);
+                return {
+                    from: m.sender_pk,
+                    timestamp: m.timestamp,
+                    nonce: m.nonce,
+                    expiry: m.expiry,
+                    kind: m.kind,
+                    ack_for: m.ack_for,
+                    message: decoded
+                };
+            });
+
+            return { result: normalized };
+        }
+
+        default:
+            return forwardToNode(method, params);
+    }
+}
+
+async function forwardToNode(method: string, params: any[]): Promise<any> {
+    try {
+        const response = await fetch(RPC_URL, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                jsonrpc: '2.0',
+                method: method,
+                params: params,
+                id: 1
+            })
+        });
+        const json = await response.json();
+        if (json.error) return { error: json.error };
+        return { result: json.result };
+    } catch (e) {
+        return { error: "Network Error or Method Not Supported" };
     }
 }
 
@@ -181,4 +281,20 @@ function hexToBytes(hex: string): Uint8Array {
         bytes[i / 2] = parseInt(hex.substring(i, i + 2), 16);
     }
     return bytes;
+}
+
+function encodePayload(payload: Uint8Array): Uint8Array {
+    const padded = new Uint8Array(MAX_PACKET);
+    const view = new DataView(padded.buffer);
+    view.setUint32(0, payload.length, true);
+    padded.set(payload, 4);
+    return padded;
+}
+
+function decodePayload(padded: Uint8Array, decoder: TextDecoder): string {
+    if (padded.length < 4) return '';
+    const view = new DataView(padded.buffer, padded.byteOffset, padded.byteLength);
+    const len = view.getUint32(0, true);
+    const slice = padded.slice(4, 4 + Math.min(len, padded.length - 4));
+    return decoder.decode(slice);
 }
