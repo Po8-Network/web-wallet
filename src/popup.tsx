@@ -2,21 +2,11 @@ import React, { useEffect, useState } from 'react';
 import ReactDOM from 'react-dom/client';
 import QRCode from "react-qr-code";
 
-interface WalletResponse {
-    success: boolean;
-    publicKey?: number[];
-    signature?: number[];
-    balance?: string;
-    history?: Transaction[];
-    networkId?: number;
-    fees?: FeeEstimates;
-    error?: string;
-}
-
-interface FeeEstimates {
-    base_fee: string;
-    priority_fee: string;
-    estimated_cost: string;
+interface WalletStatus {
+    hasVault: boolean;
+    isUnlocked: boolean;
+    address: string | null;
+    settings: { rpcUrl: string; chainId: number };
 }
 
 interface Transaction {
@@ -32,8 +22,8 @@ const styles = {
         width: '350px',
         padding: '0',
         fontFamily: "'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif",
-        backgroundColor: '#0f172a', // Slate 900
-        color: '#e2e8f0', // Slate 200
+        backgroundColor: '#0f172a',
+        color: '#e2e8f0',
         minHeight: '500px',
         display: 'flex',
         flexDirection: 'column' as const,
@@ -49,7 +39,7 @@ const styles = {
         margin: 0,
         fontSize: '18px',
         fontWeight: 600,
-        color: '#38bdf8', // Sky 400
+        color: '#38bdf8',
     },
     networkBadge: {
         fontSize: '10px',
@@ -58,7 +48,8 @@ const styles = {
         backgroundColor: '#1e293b',
         color: '#94a3b8',
         fontWeight: 600,
-        border: '1px solid #334155'
+        border: '1px solid #334155',
+        cursor: 'pointer'
     },
     content: {
         padding: '20px',
@@ -108,6 +99,7 @@ const styles = {
         fontWeight: 600,
         cursor: 'pointer',
         transition: 'background 0.2s',
+        marginBottom: '10px'
     },
     secondaryButton: {
         width: '100%',
@@ -158,272 +150,284 @@ const styles = {
         fontWeight: 600,
         color: '#e2e8f0'
     },
-    feeRow: {
-        display: 'flex',
-        justifyContent: 'space-between',
-        fontSize: '12px',
-        color: '#94a3b8',
-        marginTop: '10px',
-        paddingTop: '10px',
-        borderTop: '1px solid #334155'
-    }
 };
 
 function Popup() {
-  const [address, setAddress] = useState<string | null>(null);
-  const [balance, setBalance] = useState<string>('0');
-  const [history, setHistory] = useState<Transaction[]>([]);
-  const [networkId, setNetworkId] = useState<number | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [view, setView] = useState<'main' | 'send' | 'receive'>('main');
-  
-  // Send Form State
-  const [recipient, setRecipient] = useState('');
-  const [amount, setAmount] = useState('');
-  const [fee] = useState<string | null>(null);
-  const [status, setStatus] = useState<string | null>(null);
-  const [copyFeedback, setCopyFeedback] = useState(false);
+    const [status, setStatus] = useState<WalletStatus | null>(null);
+    const [loading, setLoading] = useState(false);
+    const [view, setView] = useState<'loading' | 'create' | 'unlock' | 'main' | 'send' | 'receive' | 'settings'>('loading');
+    
+    // Data
+    const [balance, setBalance] = useState('0');
+    const [history, setHistory] = useState<Transaction[]>([]);
+    const [error, setError] = useState<string | null>(null);
 
-  // Initial load: Check wallet
-  useEffect(() => {
-    chrome.runtime.sendMessage({ type: 'GET_ACCOUNT' }, (response: any) => {
-        if (response && response.address) {
-            setAddress(response.address);
-            refreshData();
-        } else {
-            // Check if we need to create one (handled by UI button)
+    // Inputs
+    const [password, setPassword] = useState('');
+    const [confirmPassword, setConfirmPassword] = useState('');
+    const [recipient, setRecipient] = useState('');
+    const [amount, setAmount] = useState('');
+    
+    // Settings Inputs
+    const [rpcUrl, setRpcUrl] = useState('');
+    const [chainId, setChainId] = useState('');
+
+    useEffect(() => {
+        checkStatus();
+    }, []);
+
+    const checkStatus = () => {
+        chrome.runtime.sendMessage({ type: 'GET_STATUS' }, (res: WalletStatus) => {
+            setStatus(res);
+            if (!res.hasVault) {
+                setView('create');
+            } else if (!res.isUnlocked) {
+                setView('unlock');
+            } else {
+                setView('main');
+                refreshData();
+            }
+        });
+    };
+
+    const refreshData = () => {
+        chrome.runtime.sendMessage({ type: 'RPC_REQUEST', method: 'eth_getBalance', params: [status?.address, 'latest'] }, (res) => {
+            if (res && res.result) {
+                // Convert Wei hex to PO8 (simplified)
+                const wei = BigInt(res.result);
+                const po8 = Number(wei) / 1e18; // Approx
+                setBalance(po8.toFixed(4));
+            }
+        });
+        // History mocking or real fetch via custom RPC needed
+    };
+
+    const handleCreate = () => {
+        if (password.length < 8) {
+            setError("Password must be at least 8 characters");
+            return;
         }
-    });
-  }, []);
-
-  const createWallet = () => {
-    setLoading(true);
-    chrome.runtime.sendMessage({ type: 'CREATE_ACCOUNT' }, (response: any) => {
-        setLoading(false);
-        if (response && response.success && response.address) {
-            setAddress(response.address);
-            refreshData();
+        if (password !== confirmPassword) {
+            setError("Passwords do not match");
+            return;
         }
-    });
-  };
+        setLoading(true);
+        chrome.runtime.sendMessage({ type: 'CREATE_VAULT', password }, (res) => {
+            setLoading(false);
+            if (res.success) {
+                checkStatus();
+            } else {
+                setError(res.error || "Creation failed");
+            }
+        });
+    };
 
-  const refreshData = () => {
-      chrome.runtime.sendMessage({ type: 'GET_BALANCE' }, (res: WalletResponse) => {
-          if (res && res.success && res.balance) setBalance(res.balance);
-      });
-      chrome.runtime.sendMessage({ type: 'GET_NETWORK' }, (res: WalletResponse) => {
-          if (res && res.success && res.networkId) setNetworkId(res.networkId);
-      });
-      chrome.runtime.sendMessage({ type: 'GET_HISTORY' }, (res: WalletResponse) => {
-          if (res && res.success && res.history) setHistory(res.history);
-      });
-  }
+    const handleUnlock = () => {
+        setLoading(true);
+        chrome.runtime.sendMessage({ type: 'UNLOCK_VAULT', password }, (res) => {
+            setLoading(false);
+            if (res.success) {
+                setPassword(''); // Clear sensitive data
+                checkStatus();
+            } else {
+                setError(res.error || "Unlock failed");
+            }
+        });
+    };
 
-  const handleSend = async () => {
-      if (!recipient || !amount) {
-          setStatus("Please fill in all fields");
-          return;
-      }
+    const handleLock = () => {
+        chrome.runtime.sendMessage({ type: 'LOCK_VAULT' }, () => {
+            checkStatus();
+        });
+    };
 
-      setLoading(true);
-      setStatus("Signing with ML-DSA (Quantum Safe)...");
+    const handleSend = () => {
+        if (!recipient || !amount) {
+            setError("Please fill all fields");
+            return;
+        }
+        // Amount to Wei
+        const val = BigInt(Math.floor(parseFloat(amount) * 1e18)).toString();
 
-      // Use RPC method via generic messaging
-      chrome.runtime.sendMessage({ 
-          type: 'RPC_REQUEST', 
-          method: 'eth_sendTransaction',
-          params: [{ to: recipient, value: amount }]
-      }, (response: any) => {
-          setLoading(false);
-          if (response && response.result) {
-              setStatus("Transaction Sent!");
-              setTimeout(() => {
-                  setView('main');
-                  setStatus(null);
-                  setRecipient('');
-                  setAmount('');
-                  refreshData(); 
-              }, 1500);
-          } else {
-              setStatus(response.error || "Transaction Failed");
-          }
-      });
-  };
+        setLoading(true);
+        chrome.runtime.sendMessage({ 
+            type: 'RPC_REQUEST', 
+            method: 'eth_sendTransaction',
+            params: [{ to: recipient, value: val }]
+        }, (res) => {
+            setLoading(false);
+            if (res.result) {
+                setError("Transaction Sent!"); // Hijack error for success msg temporarily
+                setTimeout(() => {
+                    setView('main');
+                    setError(null);
+                    setAmount('');
+                    setRecipient('');
+                    refreshData();
+                }, 1500);
+            } else {
+                setError(res.error || "Transaction Failed");
+            }
+        });
+    };
 
-  const copyToClipboard = () => {
-      if (address) {
-          navigator.clipboard.writeText(address);
-          setCopyFeedback(true);
-          setTimeout(() => setCopyFeedback(false), 2000);
-      }
-  };
+    const handleSaveSettings = () => {
+        const newSettings = {
+            rpcUrl: rpcUrl,
+            chainId: parseInt(chainId) || 1337
+        };
+        chrome.runtime.sendMessage({ type: 'SAVE_SETTINGS', settings: newSettings }, () => {
+            checkStatus(); // Reloads settings into state
+            setView('main');
+        });
+    };
 
-  const getNetworkName = (id: number | null) => {
-      if (!id) return 'Connecting...';
-      if (id === 1337) return 'Development';
-      if (id === 80001) return 'Testnet';
-      if (id === 8) return 'Mainnet';
-      return `Chain ${id}`;
-  }
+    const openSettings = () => {
+        if (status) {
+            setRpcUrl(status.settings.rpcUrl);
+            setChainId(status.settings.chainId.toString());
+            setView('settings');
+        }
+    };
 
-  if (!address) {
-      return (
-          <div style={styles.container}>
-              <div style={styles.header}>
-                  <h1 style={styles.title}>Po8 Network</h1>
-              </div>
-              <div style={{...styles.content, display: 'flex', flexDirection: 'column', justifyContent: 'center', alignItems: 'center'}}>
-                  <div style={{marginBottom: '20px', textAlign: 'center', color: '#94a3b8'}}>
-                      <p>Welcome to the Post-Quantum Era.</p>
-                  </div>
-                  <button 
-                    onClick={createWallet} 
-                    disabled={loading}
-                    style={styles.button}>
-                    {loading ? "Generating Lattice Keys..." : "Create New Wallet"}
-                  </button>
-              </div>
-          </div>
-      );
-  }
+    if (view === 'loading') return <div style={styles.container}><div style={{padding: 20}}>Loading...</div></div>;
 
-  return (
-    <div style={styles.container}>
-      <div style={styles.header}>
-        <h1 style={styles.title}>Po8 Network</h1>
-        <div style={styles.networkBadge}>{getNetworkName(networkId)}</div>
-      </div>
-      
-      {view === 'main' && (
-        <div style={styles.content}>
-            <div style={{textAlign: 'center', marginBottom: '30px'}}>
-                <span style={styles.label}>Total Balance</span>
-                <div style={styles.balance}>
-                    {balance}<span style={styles.balanceLabel}>PO8</span>
-                </div>
-            </div>
+    if (view === 'create') {
+        return (
+            <div style={styles.container}>
+                <div style={styles.header}><h1 style={styles.title}>Create Wallet</h1></div>
+                <div style={styles.content}>
+                    <p style={{color: '#94a3b8', fontSize: '13px', marginBottom: '20px'}}>
+                        Set a secure password to encrypt your post-quantum keys.
+                    </p>
+                    <span style={styles.label}>New Password</span>
+                    <input type="password" style={styles.input} value={password} onChange={e => setPassword(e.target.value)} />
+                    
+                    <span style={styles.label}>Confirm Password</span>
+                    <input type="password" style={styles.input} value={confirmPassword} onChange={e => setConfirmPassword(e.target.value)} />
 
-            <div style={styles.card}>
-                <span style={styles.label}>Your Address</span>
-                <div style={styles.value}>
-                    {address.slice(0, 10)}...{address.slice(-8)}
-                </div>
-            </div>
+                    {error && <div style={styles.error}>{error}</div>}
 
-            <div style={{flex: 1, overflowY: 'auto', marginBottom: '20px'}}>
-                <span style={styles.label}>Recent Activity</span>
-                {history.length === 0 ? (
-                    <div style={{color: '#64748b', fontSize: '13px', textAlign: 'center', marginTop: '20px'}}>
-                        No transactions yet
+                    <div style={{marginTop: 'auto'}}>
+                        <button style={styles.button} onClick={handleCreate} disabled={loading}>
+                            {loading ? "Generating..." : "Create Wallet"}
+                        </button>
                     </div>
-                ) : (
-                    history.map((tx, i) => (
-                        <div key={i} style={styles.txItem}>
-                            <div>
-                                <div style={styles.txHash}>Sent to {tx.recipient.slice(0, 6)}...</div>
-                                <div style={styles.txMeta}>{new Date(tx.timestamp * 1000).toLocaleTimeString()}</div>
-                            </div>
-                            <div style={styles.txAmount}>-{tx.amount} PO8</div>
+                </div>
+            </div>
+        );
+    }
+
+    if (view === 'unlock') {
+        return (
+            <div style={styles.container}>
+                <div style={styles.header}><h1 style={styles.title}>Unlock Wallet</h1></div>
+                <div style={styles.content}>
+                    <div style={{textAlign: 'center', marginBottom: '30px', marginTop: '40px'}}>
+                        <div style={{fontSize: '40px'}}>🔒</div>
+                    </div>
+                    <span style={styles.label}>Password</span>
+                    <input type="password" style={styles.input} value={password} onChange={e => setPassword(e.target.value)} onKeyDown={e => e.key === 'Enter' && handleUnlock()} />
+
+                    {error && <div style={styles.error}>{error}</div>}
+
+                    <button style={styles.button} onClick={handleUnlock} disabled={loading}>
+                        {loading ? "Unlocking..." : "Unlock"}
+                    </button>
+                    
+                    <p style={{textAlign: 'center', fontSize: '12px', color: '#64748b', marginTop: '20px'}}>
+                        Po8 Lattice Cryptography
+                    </p>
+                </div>
+            </div>
+        );
+    }
+
+    if (view === 'settings') {
+        return (
+            <div style={styles.container}>
+                <div style={styles.header}>
+                    <h1 style={styles.title}>Settings</h1>
+                    <button onClick={() => setView('main')} style={{background:'none', border:'none', color:'#fff', cursor:'pointer'}}>✕</button>
+                </div>
+                <div style={styles.content}>
+                    <span style={styles.label}>RPC URL</span>
+                    <input style={styles.input} value={rpcUrl} onChange={e => setRpcUrl(e.target.value)} />
+
+                    <span style={styles.label}>Chain ID</span>
+                    <input style={styles.input} value={chainId} onChange={e => setChainId(e.target.value)} />
+
+                    <button style={styles.button} onClick={handleSaveSettings}>Save</button>
+                </div>
+            </div>
+        );
+    }
+
+    return (
+        <div style={styles.container}>
+            <div style={styles.header}>
+                <h1 style={styles.title}>Po8 Network</h1>
+                <div style={{display:'flex', gap:'10px', alignItems:'center'}}>
+                    <div style={styles.networkBadge} onClick={openSettings}>
+                        {status?.settings.chainId === 1337 ? 'Dev' : status?.settings.chainId === 8 ? 'Main' : 'Custom'}
+                    </div>
+                    <button onClick={handleLock} style={{background:'none', border:'none', cursor:'pointer', fontSize:'16px'}}>🔒</button>
+                </div>
+            </div>
+
+            {view === 'main' && (
+                <div style={styles.content}>
+                    <div style={{textAlign: 'center', marginBottom: '30px'}}>
+                        <span style={styles.label}>Total Balance</span>
+                        <div style={styles.balance}>
+                            {balance}<span style={styles.balanceLabel}>PO8</span>
                         </div>
-                    )).reverse()
-                )}
-            </div>
+                    </div>
 
-            <div style={{marginTop: 'auto'}}>
-                <button style={styles.button} onClick={() => setView('send')}>Send</button>
-                <button style={styles.secondaryButton} onClick={() => setView('receive')}>Receive</button>
-            </div>
-        </div>
-      )}
+                    <div style={styles.card}>
+                        <span style={styles.label}>Your Address</span>
+                        <div style={styles.value}>
+                            {status?.address?.slice(0, 10)}...{status?.address?.slice(-8)}
+                        </div>
+                    </div>
 
-      {view === 'send' && (
-        <div style={styles.content}>
-            <div style={{marginBottom: '20px'}}>
-                <button 
-                    onClick={() => setView('main')}
-                    style={{background: 'none', border: 'none', color: '#94a3b8', cursor: 'pointer', padding: 0, fontSize: '14px'}}>
-                    ← Back
-                </button>
-                <h2 style={{margin: '10px 0 0 0', fontSize: '20px'}}>Send PO8</h2>
-            </div>
-
-            <div>
-                <span style={styles.label}>Recipient Address</span>
-                <input 
-                    style={styles.input} 
-                    placeholder="0x..." 
-                    value={recipient}
-                    onChange={(e) => setRecipient(e.target.value)}
-                />
-
-                <span style={styles.label}>Amount</span>
-                <input 
-                    style={styles.input} 
-                    type="number" 
-                    placeholder="0.00" 
-                    value={amount}
-                    onChange={(e) => setAmount(e.target.value)}
-                />
-            </div>
-
-            {fee && (
-                <div style={styles.feeRow}>
-                    <span>Network Fee (Estimated)</span>
-                    <span>{fee} PO8</span>
-                </div>
-            )}
-            {fee && amount && (
-                <div style={{...styles.feeRow, borderTop: 'none', color: '#f8fafc', fontWeight: 600}}>
-                    <span>Total Cost</span>
-                    <span>{(parseFloat(amount) + parseFloat(fee)).toFixed(4)} PO8</span>
+                    <div style={{marginTop: 'auto'}}>
+                        <button style={styles.button} onClick={() => setView('send')}>Send</button>
+                        <button style={styles.secondaryButton} onClick={() => setView('receive')}>Receive</button>
+                    </div>
                 </div>
             )}
 
-            {status && <div style={{...styles.error, color: status.includes("Sent") ? '#22c55e' : '#ef4444'}}>{status}</div>}
-
-            <div style={{marginTop: '20px'}}>
-                <button 
-                    style={{...styles.button, opacity: loading ? 0.7 : 1}} 
-                    onClick={handleSend}
-                    disabled={loading}
-                >
-                    {loading ? "Signing..." : "Confirm Send"}
-                </button>
-            </div>
-        </div>
-      )}
-
-      {view === 'receive' && (
-        <div style={{...styles.content, display: 'flex', flexDirection: 'column', alignItems: 'center'}}>
-            <div style={{marginBottom: '20px', width: '100%'}}>
-                <button 
-                    onClick={() => setView('main')}
-                    style={{background: 'none', border: 'none', color: '#94a3b8', cursor: 'pointer', padding: 0, fontSize: '14px'}}>
-                    ← Back
-                </button>
-                <h2 style={{margin: '10px 0 0 0', fontSize: '20px'}}>Receive PO8</h2>
-            </div>
-
-            <div style={{backgroundColor: 'white', padding: '16px', borderRadius: '12px', marginBottom: '20px'}}>
-                <QRCode value={address} size={200} />
-            </div>
-
-            <div style={{...styles.card, width: '100%', textAlign: 'center'}}>
-                <span style={styles.label}>Your Address</span>
-                <div style={{...styles.value, marginBottom: '12px', fontSize: '11px'}}>
-                    {address}
+            {view === 'send' && (
+                <div style={styles.content}>
+                     <div style={{marginBottom: '20px'}}>
+                        <button onClick={() => setView('main')} style={{background: 'none', border: 'none', color: '#94a3b8', cursor: 'pointer', padding: 0}}>← Back</button>
+                        <h2 style={{margin: '10px 0 0 0', fontSize: '20px'}}>Send PO8</h2>
+                    </div>
+                    <span style={styles.label}>Recipient</span>
+                    <input style={styles.input} placeholder="0x..." value={recipient} onChange={e => setRecipient(e.target.value)} />
+                    <span style={styles.label}>Amount</span>
+                    <input style={styles.input} type="number" placeholder="0.00" value={amount} onChange={e => setAmount(e.target.value)} />
+                    
+                    {error && <div style={{...styles.error, color: error.includes("Sent") ? '#22c55e' : '#ef4444'}}>{error}</div>}
+                    
+                    <button style={styles.button} onClick={handleSend} disabled={loading}>{loading ? "Signing..." : "Send"}</button>
                 </div>
-                <button 
-                    onClick={copyToClipboard}
-                    style={{...styles.button, padding: '8px', fontSize: '12px', background: copyFeedback ? '#22c55e' : '#334155'}}
-                >
-                    {copyFeedback ? "Copied!" : "Copy Address"}
-                </button>
-            </div>
+            )}
+
+            {view === 'receive' && (
+                <div style={{...styles.content, alignItems: 'center'}}>
+                    <div style={{width:'100%', marginBottom: '20px'}}>
+                        <button onClick={() => setView('main')} style={{background: 'none', border: 'none', color: '#94a3b8', cursor: 'pointer', padding: 0}}>← Back</button>
+                    </div>
+                    <div style={{backgroundColor: 'white', padding: '16px', borderRadius: '12px', marginBottom: '20px'}}>
+                        <QRCode value={status?.address || ''} size={200} />
+                    </div>
+                    <div style={styles.value}>{status?.address}</div>
+                </div>
+            )}
         </div>
-      )}
-    </div>
-  );
+    );
 }
 
 const rootElement = document.getElementById('root');
@@ -434,9 +438,3 @@ if (rootElement) {
       </React.StrictMode>
     );
 }
-
-
-
-
-
-
